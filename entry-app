@@ -8,6 +8,143 @@ sheet_classes <- "YOUR_SECOND_SHEET_ID"
 
 # Set authentication options for Google Sheets
 options(
+        gargle_oauth_email = TRUE,
+        gargle_oauth_cache = "KetSDA/Data_Science/KetSDA_data_entry/Data_entry_app/.secrets/"
+)
+
+gs4_auth(email = "your-email@example.com")
+
+# User credentials (to be replaced with a secure authentication system)
+credentials <- data.frame(
+        user = c("User"),
+        password = c("password"),
+        stringsAsFactors = FALSE
+)
+
+adult_classrooms <- c("Living Like Jesus (FH)", "Lesson for Life (N1)", "Be Together (N2)", "Collegiate (N3)", 
+                      "Young Professionals (N4)", "Conversations Toward God (S2)", "Thrive Bible Study (S3)", 
+                      "Seekers (S4)", "Men's Class (Pastor Clay's office)", "Intentional Parenting (Children's Check-in)")
+
+children_classrooms <- c("Nursery (C01)", "Cradle Roll 1 (C02)", "Cradle Roll 2 (C03)", "Kindergarten 1 (C04)", 
+                         "Kindergarten 2 (C11)", "Primary 1 (C12)", "Primary 2 (C13)", "Juniors (C14)", 
+                         "Earliteen (S1)", "Youth (Youth Center)")
+
+church_services <- c("Ascent", "Sanctuary")
+
+ui <- secure_app(
+        fluidPage(
+                titlePanel("Church Attendance Entry"),
+                tabsetPanel(
+                        tabPanel("Church Services",
+                                 lapply(church_services, function(service) {
+                                         numericInput(paste0("service_", service), paste("Enter Attendance for", service, ":"), 0, min = 0)
+                                 }),
+                                 textOutput("submitted_services"),
+                                 actionButton("submit_services", "Submit")
+                        ),
+                        tabPanel("Adult Classrooms",
+                                 lapply(adult_classrooms, function(classroom) {
+                                         numericInput(paste0("adult_", gsub(" ", "_", classroom)), paste("Enter Attendance for", classroom, ":"), 0, min = 0)
+                                 }),
+                                 textOutput("submitted_adults"),
+                                 textOutput("note_s2"),
+                                 actionButton("submit_adults", "Submit")
+                        ),
+                        tabPanel("Children’s Classrooms",
+                                 lapply(children_classrooms, function(classroom) {
+                                         numericInput(paste0("children_", gsub(" ", "_", classroom)), paste("Enter Attendance for", classroom, ":"), 0, min = 0)
+                                 }),
+                                 textOutput("submitted_children"),
+                                 textAreaInput("children_notes", "Notes:", ""),
+                                 textOutput("note_kids_church"),
+                                 actionButton("submit_children", "Submit")
+                        )
+                )
+        )
+)
+
+server <- function(input, output, session) {
+        res_auth <- secure_server(check_credentials = check_credentials(credentials))
+        
+        # Check if data has already been submitted
+        check_submission <- function(sheet, category_column, name) {
+                data <- suppressWarnings(read_sheet(sheet))
+                
+                if (is.null(data) || nrow(data) == 0 || !("Date" %in% colnames(data))) {
+                        return("No data available.")
+                }
+                
+                today_data <- data[data$Date == format(Sys.Date(), "%m/%d/%Y") & data[[category_column]] == name, ]
+                
+                if (nrow(today_data) > 0) {
+                        return(paste("Submitted count:", today_data$Attendance))
+                } else {
+                        return("No submission yet for today.")
+                }
+        }
+        
+        output$submitted_services <- renderText({ check_submission(sheet_services, "Service") })
+        output$submitted_adults <- renderText({ check_submission(sheet_classes, "Classroom") })
+        output$submitted_children <- renderText({ check_submission(sheet_classes, "Classroom") })
+        
+        output$note_s2 <- renderText({
+                if (input$adult_Conversations_Toward_God_S2 >= 0) {
+                        "Count online attendees as well."
+                } else {
+                        ""
+                }
+        })
+        
+        output$note_kids_church <- renderText({
+                "Once per month, all Children's classrooms from Cradle Roll 1 to Juniors are combined into 'Kids Church'. Please enter the total attendance for Kids Church in the Notes field."
+        })
+        
+        observeEvent(input$submit_services, {
+                data <- data.frame(
+                        Date = format(Sys.Date(), "%Y%m%d"),
+                        Service = church_services,
+                        Attendance = sapply(church_services, function(service) input[[paste0("service_", service)]], simplify = TRUE)
+                )
+                
+                sheet_append(sheet_services, as.list(data))  # Convert to named list
+                showNotification("Church services data submitted!", type = "message")
+        })
+        
+        observeEvent(input$submit_adults, {
+                data <- data.frame(
+                        Date = format(Sys.Date(), "%m/%d/%Y"),
+                        Classroom = adult_classrooms,
+                        Attendance = sapply(adult_classrooms, function(classroom) input[[paste0("adult_", gsub(" ", "_", classroom))]], simplify = TRUE)
+                )
+                
+                sheet_append(sheet_classes, as.list(data))  # Convert to named list
+                showNotification("Adult classroom data submitted!", type = "message")
+        })
+        
+        observeEvent(input$submit_children, {
+                data <- data.frame(
+                        Date = format(Sys.Date(), "%m/%d/%Y"),
+                        Classroom = children_classrooms,
+                        Attendance = sapply(children_classrooms, function(classroom) input[[paste0("children_", gsub(" ", "_", classroom))]], simplify = TRUE),
+                        Notes = input$children_notes
+                )
+                
+                sheet_append(sheet_classes, as.list(data))  # Convert to named list
+                showNotification("Children's classroom data submitted!", type = "message")
+        })
+}
+
+shinyApp(ui, server)
+library(shiny)
+library(googlesheets4)
+library(shinymanager)
+
+# Google Sheets setup
+sheet_services <- "YOUR_FIRST_SHEET_ID"
+sheet_classes <- "YOUR_SECOND_SHEET_ID"
+
+# Set authentication options for Google Sheets
+options(
   gargle_oauth_email = TRUE,
   gargle_oauth_cache = "your/secrets/cache/pathway"
 )
