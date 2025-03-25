@@ -34,6 +34,7 @@ church_services <- c("Ascent", "Sanctuary")
 ui <- secure_app(
         fluidPage(
                 titlePanel("Church Attendance Entry"),
+                textOutput("current_date"),  # Display current date under the title
                 tabsetPanel(
                         tabPanel("Church Services",
                                  lapply(church_services, function(service) {
@@ -65,7 +66,10 @@ ui <- secure_app(
 
 server <- function(input, output, session) {
         res_auth <- secure_server(check_credentials = check_credentials(credentials))
-        
+
+        # Display today's date below the title
+        output$current_date <- renderText({ format(Sys.Date(), "%A, %B %d, %Y") })
+
         # Check if data has already been submitted
         check_submission <- function(sheet, category_column, name) {
                 data <- suppressWarnings(read_sheet(sheet))
@@ -132,104 +136,6 @@ server <- function(input, output, session) {
                 sheet_append(sheet_classes, as.list(data))  # Convert to named list
                 showNotification("Children's classroom data submitted!", type = "message")
         })
-}
-
-shinyApp(ui, server)
-library(shiny)
-library(googlesheets4)
-library(shinymanager)
-
-# Google Sheets setup
-sheet_services <- "YOUR_FIRST_SHEET_ID"
-sheet_classes <- "YOUR_SECOND_SHEET_ID"
-
-# Set authentication options for Google Sheets
-options(
-  gargle_oauth_email = TRUE,
-  gargle_oauth_cache = "your/secrets/cache/pathway"
-)
-gs4_auth(email = "your-email@example.com")
-
-# User credentials (to be replaced with a secure authentication system)
-credentials <- data.frame(
-  user = c("deacon1", "deacon2", "deacon3", "deacon4", "deacon5"),
-  password = c("password1", "password2", "password3", "password4", "password5"),
-  stringsAsFactors = FALSE
-)
-
-# List of services/classroom options for dropdown menus
-church_services <- c("Ascent", "Sanctuary")
-
-adult_classrooms <- c("Living Like Jesus (FH)", "Lesson for Life (N1)", "Be Together (N2)", "Collegiate (N3)", 
-                      "Young Professionals (N4)", "Conversations Toward God (S2)", "Thrive Bible Study (S3)", 
-                      "Seekers (S4)", "Men's Class (Pastor Clay's office)", "Intentional Parenting (Children's Check-in)")
-
-children_classrooms <- c("Nursery (C01)", "Cradle Roll 1 (C02)", "Cradle Roll 2 (C03)", "Kindergarten 1 (C04)", 
-                         "Kindergarten 2 (C11)", "Primary 1 (C12)", "Primary 2 (C13)", "Juniors (C14)", 
-                         "Earliteen (S1)", "Youth (Youth Center)")
-
-# User Interface
-ui <- secure_app(
-  fluidPage(
-    titlePanel("Church Attendance Entry"),
-    tabsetPanel(
-      tabPanel("Church Services",
-               selectInput("service", "Select Church Service:", choices = church_services),
-               numericInput("attendance", "Enter Attendance:", 0, min = 0),
-               actionButton("submit_services", "Submit")
-      ),
-      tabPanel("Adult Classrooms",
-               selectInput("adult_class", "Select Adult Classroom:", choices = adult_classrooms),
-               numericInput("adult_count", "Enter Attendance:", 0, min = 0),
-               textOutput("note_s2"),
-               actionButton("submit_adults", "Submit")
-      ),
-      tabPanel("Children’s Classrooms",
-               selectInput("children_class", "Select Children's Classroom:", choices = children_classrooms),
-               numericInput("children_count", "Enter Attendance:", 0, min = 0),
-               textAreaInput("children_notes", "Notes:", ""),
-               textOutput("note_kids_church"),
-               actionButton("submit_children", "Submit")
-      )
-    )
-  )
-)
-
-# Server function with additional instruction displays for the UI
-server <- function(input, output, session) {
-  res_auth <- secure_server(check_credentials = check_credentials(credentials))
-
-  output$note_s2 <- renderText({
-    if (input$adult_class == "Conversations Toward God (S2)") {
-      "Count online attendees as well."
-    } else {
-      ""
-    }
-  })
-  
-  output$note_kids_church <- renderText({
-    "Once per month, all Children's classrooms from Cradle Roll 1 to Juniors are combined into 'Kids Church'. Please enter the total attendance for Kids Church in the Notes field."
-  })
-
-  observeEvent(input$submit_services, {
-    data <- data.frame(Date = format(Sys.Date(), "%Y%m%d"), Service = input$service, Attendance = input$attendance)
-    sheet_append(sheet_services, data)
-    data_classes <- data.frame(Date = format(Sys.Date(), "%m/%d/%Y"), Service = input$service, Attendance = input$attendance)
-    sheet_append(sheet_classes, data_classes)
-    showNotification("Church services data submitted!", type = "message")
-  })
-
-  observeEvent(input$submit_adults, {
-    data <- data.frame(Date = format(Sys.Date(), "%m/%d/%Y"), Classroom = input$adult_class, Attendance = input$adult_count)
-    sheet_append(sheet_classes, data)
-    showNotification("Adult classroom data submitted!", type = "message")
-  })
-
-  observeEvent(input$submit_children, {
-    data <- data.frame(Date = format(Sys.Date(), "%m/%d/%Y"), Classroom = input$children_class, Attendance = input$children_count, Notes = input$children_notes)
-    sheet_append(sheet_classes, data)
-    showNotification("Children's classroom data submitted!", type = "message")
-  })
 }
 
 shinyApp(ui, server)
