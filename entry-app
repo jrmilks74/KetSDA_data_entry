@@ -17,8 +17,8 @@ library(digest)
 # CONFIG
 # =========================
 
-SHEET1_ID <- "1BsQR4TyAMkV2H09jzuj5yrOIotnOBTzLoSZ0r5PsBpk"
-SHEET2_ID <- "1jVZBbrb4JpY8LErc4pL9ExgVjIqoN2EM6ITZAmcedcw"
+SHEET1_ID <- "PUT SHEET ID HERE"
+SHEET2_ID <- "PUT SHEET ID HERE"
 
 SHEET1_TAB <- "Sheet1"
 SHEET2_TAB <- "2026"
@@ -30,7 +30,7 @@ SHEET2_LOCK_CELL <- "ZZ1"
 APP_TZ <- "America/New_York"
 
 # Authenticate to Google Sheets using your service account JSON
-suppressMessages(gs4_auth(path = "church-sheets-auth.json"))
+suppressMessages(gs4_auth(path = "URL TO JSON FILE"))
 
 # =========================
 # APP LOGIN
@@ -42,7 +42,8 @@ hash_password <- function(x) {
 
 # Replace these example users/passwords with your real users
 USER_HASHES <- c(
-        "Deacons" = hash_password("Countthepeople!")
+        "user1" = hash_password("CHANGE THIS PASSWORD!"),
+        "user2" = hash_password("CHANGE THIS PASSWORD!")
 )
 
 check_login <- function(username, password) {
