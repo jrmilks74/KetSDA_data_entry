@@ -1,140 +1,827 @@
+# app.R
+# Church attendance entry app for two Google Sheets
+# - One row per date
+# - Multiple mobile devices supported
+# - Prevents duplicate rows by locking + upsert-by-date
+# - Services, adult classes, and children's classes can be submitted separately
+# - Saved values for today are shown beside each input
+# - Auto-refreshes saved values every 5 minutes
+# - Includes a simple in-app login screen for authorized users
+
 library(shiny)
 library(googlesheets4)
-library(shinymanager)
+library(dplyr)
+library(digest)
 
-# Google Sheets setup
-sheet_services <- "YOUR_FIRST_SHEET_ID"
-sheet_classes <- "YOUR_SECOND_SHEET_ID"
+# =========================
+# CONFIG
+# =========================
 
-# Set authentication options for Google Sheets
-options(
-        gargle_oauth_email = TRUE,
-        gargle_oauth_cache = "KetSDA/Data_Science/KetSDA_data_entry/Data_entry_app/.secrets/"
+SHEET1_ID <- "1BsQR4TyAMkV2H09jzuj5yrOIotnOBTzLoSZ0r5PsBpk"
+SHEET2_ID <- "1jVZBbrb4JpY8LErc4pL9ExgVjIqoN2EM6ITZAmcedcw"
+
+SHEET1_TAB <- "Sheet1"
+SHEET2_TAB <- "2026"
+
+# Cells used as temporary locks during save
+SHEET1_LOCK_CELL <- "ZZ1"
+SHEET2_LOCK_CELL <- "ZZ1"
+
+APP_TZ <- "America/New_York"
+
+# Authenticate to Google Sheets using your service account JSON
+suppressMessages(gs4_auth(path = "church-sheets-auth.json"))
+
+# =========================
+# APP LOGIN
+# =========================
+
+hash_password <- function(x) {
+        digest::digest(x, algo = "sha256", serialize = FALSE)
+}
+
+# Replace these example users/passwords with your real users
+USER_HASHES <- c(
+        "Deacons" = hash_password("Countthepeople!")
 )
 
-gs4_auth(email = "your-email@example.com")
+check_login <- function(username, password) {
+        if (is.null(username) || is.null(password) || username == "" || password == "") {
+                return(FALSE)
+        }
+        if (!(username %in% names(USER_HASHES))) {
+                return(FALSE)
+        }
+        identical(unname(USER_HASHES[[username]]), hash_password(password))
+}
 
-# User credentials (to be replaced with a secure authentication system)
-credentials <- data.frame(
-        user = c("User"),
-        password = c("password"),
-        stringsAsFactors = FALSE
+# =========================
+# COLUMN DEFINITIONS
+# =========================
+
+S1_COLS <- c(
+        "Date",
+        "First/Ascent",
+        "Second/Sanctuary",
+        "total.attendance",
+        "AscentOnline",
+        "SanctuaryOnline",
+        "Church_status"
 )
 
-adult_classrooms <- c("Living Like Jesus (FH)", "Lesson for Life (N1)", "Be Together (N2)", "Collegiate (N3)", 
-                      "Young Professionals (N4)", "Conversations Toward God (S2)", "Thrive Bible Study (S3)", 
-                      "Seekers (S4)", "Men's Class (Pastor Clay's office)", "Intentional Parenting (Children's Check-in)")
+S2_COLS <- c(
+        "Date",
+        "Ascent",
+        "Sanctuary",
+        "Total In Person",
+        "Ascent Online",
+        "Sanctuary Online",
+        "Total Online",
+        "Living Like Jesus (FH)",
+        "Biblical Foundations (Choir Room)",
+        "Portuguese (N1)",
+        "Be Together (N2)",
+        "Lesson for Life (N3)",
+        "Young Adult Life (N4)",
+        "Conversations Toward God (S2)",
+        "Thrive Bible Study (S3)",
+        "Seekers (S4)",
+        "Men's Class (Clay's office)",
+        "Identity in Christ (Church Office)",
+        "Intentional Parenting (Children's Checkin Room)",
+        "Connect (Upper Room)",
+        "Total Adults",
+        "Nursery (C01)",
+        "Cradle Roll 1 (C02)",
+        "Cradle Roll 2 (C03)",
+        "Special Needs (115)",
+        "Pre-Kindergarten (C04)",
+        "Kindergarten (C11)",
+        "Primary 1 (C12)",
+        "Primary 2 (C13)",
+        "Juniors (C14)",
+        "Earliteen 4:13 (S1)",
+        "Youth (L1)",
+        "Total Children"
+)
 
-children_classrooms <- c("Nursery (C01)", "Cradle Roll 1 (C02)", "Cradle Roll 2 (C03)", "Kindergarten 1 (C04)", 
-                         "Kindergarten 2 (C11)", "Primary 1 (C12)", "Primary 2 (C13)", "Juniors (C14)", 
-                         "Earliteen (S1)", "Youth (Youth Center)")
+ADULT_CLASS_COLS <- c(
+        "Living Like Jesus (FH)",
+        "Biblical Foundations (Choir Room)",
+        "Portuguese (N1)",
+        "Be Together (N2)",
+        "Lesson for Life (N3)",
+        "Young Adult Life (N4)",
+        "Conversations Toward God (S2)",
+        "Thrive Bible Study (S3)",
+        "Seekers (S4)",
+        "Men's Class (Clay's office)",
+        "Identity in Christ (Church Office)",
+        "Intentional Parenting (Children's Checkin Room)",
+        "Connect (Upper Room)"
+)
 
-church_services <- c("Ascent", "Sanctuary")
+CHILD_CLASS_COLS <- c(
+        "Nursery (C01)",
+        "Cradle Roll 1 (C02)",
+        "Cradle Roll 2 (C03)",
+        "Special Needs (115)",
+        "Pre-Kindergarten (C04)",
+        "Kindergarten (C11)",
+        "Primary 1 (C12)",
+        "Primary 2 (C13)",
+        "Juniors (C14)",
+        "Earliteen 4:13 (S1)",
+        "Youth (L1)"
+)
 
-ui <- secure_app(
-        fluidPage(
-                titlePanel("Church Attendance Entry"),
-                textOutput("current_date"),  # Display current date under the title
-                tabsetPanel(
-                        tabPanel("Church Services",
-                                 lapply(church_services, function(service) {
-                                         numericInput(paste0("service_", service), paste("Enter Attendance for", service, ":"), 0, min = 0)
-                                 }),
-                                 textOutput("submitted_services"),
-                                 actionButton("submit_services", "Submit")
-                        ),
-                        tabPanel("Adult Classrooms",
-                                 lapply(adult_classrooms, function(classroom) {
-                                         numericInput(paste0("adult_", gsub(" ", "_", classroom)), paste("Enter Attendance for", classroom, ":"), 0, min = 0)
-                                 }),
-                                 textOutput("submitted_adults"),
-                                 textOutput("note_s2"),
-                                 actionButton("submit_adults", "Submit")
-                        ),
-                        tabPanel("Children’s Classrooms",
-                                 lapply(children_classrooms, function(classroom) {
-                                         numericInput(paste0("children_", gsub(" ", "_", classroom)), paste("Enter Attendance for", classroom, ":"), 0, min = 0)
-                                 }),
-                                 textOutput("submitted_children"),
-                                 textAreaInput("children_notes", "Notes:", ""),
-                                 textOutput("note_kids_church"),
-                                 actionButton("submit_children", "Submit")
+# =========================
+# HELPERS
+# =========================
+
+today_ymd <- function() {
+        format(as.POSIXct(Sys.time(), tz = APP_TZ), "%Y-%m-%d")
+}
+
+as_int_or_na <- function(x) {
+        if (is.null(x) || length(x) == 0 || all(is.na(x))) {
+                return(NA_integer_)
+        }
+        
+        if (length(x) > 1) {
+                x <- x[1]
+        }
+        
+        if (is.character(x)) {
+                x <- trimws(x)
+                if (x == "") return(NA_integer_)
+        }
+        
+        num <- suppressWarnings(as.numeric(x))
+        
+        if (is.na(num)) {
+                return(NA_integer_)
+        }
+        
+        as.integer(round(num))
+}
+
+empty_row <- function(cols) {
+        out <- as.list(rep(NA, length(cols)))
+        names(out) <- cols
+        out
+}
+
+assert_headers <- function(df, expected_cols, which_sheet = "Sheet") {
+        missing <- setdiff(expected_cols, names(df))
+        if (length(missing) > 0) {
+                stop(
+                        paste0(
+                                which_sheet,
+                                " is missing expected columns: ",
+                                paste(missing, collapse = ", ")
+                        )
+                )
+        }
+}
+
+read_sheet_all <- function(ss, sheet) {
+        read_sheet(ss = ss, sheet = sheet, col_types = "c")
+}
+
+normalize_date_string <- function(x) {
+        if (length(x) == 0 || is.null(x) || all(is.na(x))) {
+                return(rep(NA_character_, length(x)))
+        }
+        
+        x <- as.character(x)
+        x <- trimws(x)
+        out <- rep(NA_character_, length(x))
+        
+        idx1 <- grepl("^\\d{4}-\\d{2}-\\d{2}$", x)
+        out[idx1] <- x[idx1]
+        
+        idx2 <- grepl("^\\d{1,2}/\\d{1,2}/\\d{4}$", x)
+        if (any(idx2)) {
+                out[idx2] <- format(as.Date(x[idx2], format = "%m/%d/%Y"), "%Y-%m-%d")
+        }
+        
+        idx3 <- grepl("^\\d{1,2}/\\d{1,2}/\\d{2}$", x)
+        if (any(idx3)) {
+                out[idx3] <- format(as.Date(x[idx3], format = "%m/%d/%y"), "%Y-%m-%d")
+        }
+        
+        out
+}
+
+prepare_sheet_dates <- function(df) {
+        if ("Date" %in% names(df)) {
+                df$Date <- normalize_date_string(df$Date)
+        }
+        df
+}
+
+col_to_letter <- function(n) {
+        letters_vec <- LETTERS
+        out <- ""
+        while (n > 0) {
+                r <- (n - 1) %% 26
+                out <- paste0(letters_vec[r + 1], out)
+                n <- (n - 1) %/% 26
+        }
+        out
+}
+
+with_sheet_lock <- function(ss, sheet, lock_cell, fn, retries = 12, wait_sec = 0.4) {
+        token <- paste0("LOCK_", as.numeric(Sys.time()), "_", sample.int(1e9, 1))
+        
+        for (i in seq_len(retries)) {
+                current <- tryCatch(
+                        range_read(ss, sheet = sheet, range = lock_cell, col_names = FALSE),
+                        error = function(e) NULL
+                )
+                
+                current_val <- NA_character_
+                if (!is.null(current) && nrow(current) >= 1 && ncol(current) >= 1) {
+                        current_val <- as.character(current[[1]][1])
+                }
+                
+                if (is.na(current_val) || current_val == "" || current_val == "NA") {
+                        range_write(
+                                ss,
+                                sheet = sheet,
+                                range = lock_cell,
+                                data = data.frame(token, stringsAsFactors = FALSE),
+                                col_names = FALSE
+                        )
+                        
+                        confirm <- tryCatch(
+                                range_read(ss, sheet = sheet, range = lock_cell, col_names = FALSE),
+                                error = function(e) NULL
+                        )
+                        
+                        confirm_val <- NA_character_
+                        if (!is.null(confirm) && nrow(confirm) >= 1 && ncol(confirm) >= 1) {
+                                confirm_val <- as.character(confirm[[1]][1])
+                        }
+                        
+                        if (!is.na(confirm_val) && identical(confirm_val, token)) {
+                                on.exit({
+                                        tryCatch(
+                                                range_write(
+                                                        ss,
+                                                        sheet = sheet,
+                                                        range = lock_cell,
+                                                        data = data.frame("", stringsAsFactors = FALSE),
+                                                        col_names = FALSE
+                                                ),
+                                                error = function(e) NULL
+                                        )
+                                }, add = TRUE)
+                                
+                                return(fn())
+                        }
+                }
+                
+                Sys.sleep(wait_sec)
+        }
+        
+        stop("Another device is saving right now. Please try again.")
+}
+
+get_saved_row <- function(ss, sheet, cols, date_str) {
+        df <- read_sheet_all(ss, sheet)
+        assert_headers(df, cols, paste0(ss, "/", sheet))
+        df <- prepare_sheet_dates(df)
+        
+        hit <- df %>%
+                filter(.data$Date == date_str) %>%
+                select(all_of(cols))
+        
+        if (nrow(hit) == 0) {
+                row <- empty_row(cols)
+                row$Date <- date_str
+                return(as.data.frame(row, stringsAsFactors = FALSE))
+        }
+        
+        hit[1, , drop = FALSE]
+}
+
+upsert_by_date <- function(ss, sheet, cols, date_str, new_values_named) {
+        df <- read_sheet_all(ss, sheet)
+        assert_headers(df, cols, paste0(ss, "/", sheet))
+        df <- prepare_sheet_dates(df)
+        
+        row_exists <- which(df$Date == date_str)
+        
+        if (length(row_exists) > 0) {
+                idx <- row_exists[1]
+                existing <- df[idx, cols, drop = FALSE]
+                
+                for (nm in names(new_values_named)) {
+                        if (nm %in% cols) existing[[nm]] <- new_values_named[[nm]]
+                }
+                
+                existing$Date <- date_str
+                
+                # +1 because sheet row 1 is headers
+                sheet_row <- idx + 1
+                last_col_letter <- col_to_letter(length(cols))
+                a1 <- paste0("A", sheet_row, ":", last_col_letter, sheet_row)
+                
+                range_write(
+                        ss,
+                        sheet = sheet,
+                        range = a1,
+                        data = existing,
+                        col_names = FALSE
+                )
+                
+                invisible(existing)
+        } else {
+                row <- empty_row(cols)
+                row$Date <- date_str
+                
+                for (nm in names(new_values_named)) {
+                        if (nm %in% cols) row[[nm]] <- new_values_named[[nm]]
+                }
+                
+                row$Date <- date_str
+                new_df <- as.data.frame(row, stringsAsFactors = FALSE)
+                
+                sheet_append(ss, sheet = sheet, data = new_df)
+                
+                invisible(new_df)
+        }
+}
+
+compute_sheet1_totals <- function(vals) {
+        ascent <- as_int_or_na(vals[["First/Ascent"]])
+        sanct <- as_int_or_na(vals[["Second/Sanctuary"]])
+        ascent_online <- as_int_or_na(vals[["AscentOnline"]])
+        sanct_online <- as_int_or_na(vals[["SanctuaryOnline"]])
+        
+        total <- if (is.na(ascent) && is.na(sanct)) {
+                NA_integer_
+        } else {
+                sum(c(ascent, sanct), na.rm = TRUE)
+        }
+        
+        vals[["First/Ascent"]] <- ascent
+        vals[["Second/Sanctuary"]] <- sanct
+        vals[["AscentOnline"]] <- ascent_online
+        vals[["SanctuaryOnline"]] <- sanct_online
+        vals[["total.attendance"]] <- total
+        vals[["Church_status"]] <- "Open"
+        
+        vals
+}
+
+compute_sheet2_totals <- function(vals) {
+        ascent <- as_int_or_na(vals[["Ascent"]])
+        sanct <- as_int_or_na(vals[["Sanctuary"]])
+        ascent_online <- as_int_or_na(vals[["Ascent Online"]])
+        sanct_online <- as_int_or_na(vals[["Sanctuary Online"]])
+        
+        total_inperson <- if (is.na(ascent) && is.na(sanct)) {
+                NA_integer_
+        } else {
+                sum(c(ascent, sanct), na.rm = TRUE)
+        }
+        
+        total_online <- if (is.na(ascent_online) && is.na(sanct_online)) {
+                NA_integer_
+        } else {
+                sum(c(ascent_online, sanct_online), na.rm = TRUE)
+        }
+        
+        adult_vals <- lapply(ADULT_CLASS_COLS, function(nm) as_int_or_na(vals[[nm]]))
+        total_adults <- if (all(vapply(adult_vals, is.na, logical(1)))) {
+                NA_integer_
+        } else {
+                sum(unlist(adult_vals), na.rm = TRUE)
+        }
+        
+        child_vals <- lapply(CHILD_CLASS_COLS, function(nm) as_int_or_na(vals[[nm]]))
+        total_children <- if (all(vapply(child_vals, is.na, logical(1)))) {
+                NA_integer_
+        } else {
+                sum(unlist(child_vals), na.rm = TRUE)
+        }
+        
+        vals[["Ascent"]] <- ascent
+        vals[["Sanctuary"]] <- sanct
+        vals[["Ascent Online"]] <- ascent_online
+        vals[["Sanctuary Online"]] <- sanct_online
+        vals[["Total In Person"]] <- total_inperson
+        vals[["Total Online"]] <- total_online
+        vals[["Total Adults"]] <- total_adults
+        vals[["Total Children"]] <- total_children
+        
+        vals
+}
+
+input_with_saved <- function(id, label) {
+        fluidRow(
+                column(
+                        width = 7,
+                        numericInput(id, label, value = NA, min = 0, step = 1, width = "100%")
+                ),
+                column(
+                        width = 5,
+                        div(
+                                class = "saved-wrap",
+                                strong("Saved: "),
+                                textOutput(paste0(id, "_saved"), inline = TRUE)
                         )
                 )
         )
+}
+
+# =========================
+# UI
+# =========================
+
+login_ui <- tagList(
+        div(
+                style = "max-width: 420px; margin: 60px auto; background: white; padding: 24px; border: 1px solid #d9dee8; border-radius: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.06);",
+                h3("Church Attendance Login", style = "margin-top: 0;"),
+                p(class = "muted", "Authorized deacons only."),
+                textInput("login_user", "Username"),
+                passwordInput("login_pass", "Password"),
+                actionButton("login_btn", "Log in", class = "btn-primary"),
+                br(), br(),
+                uiOutput("login_status")
+        )
 )
 
+main_app_ui <- tagList(
+        titlePanel("Church Attendance Entry"),
+        
+        div(
+                style = "text-align: right; margin-bottom: 12px;",
+                actionButton("logout_btn", "Log out")
+        ),
+        
+        div(
+                class = "section-card",
+                h4("Date"),
+                p(class = "muted", "Date uses the server clock in Eastern Time."),
+                verbatimTextOutput("today_out")
+        ),
+        
+        div(
+                class = "section-card",
+                h4("Services"),
+                input_with_saved("ascent", "Ascent"),
+                input_with_saved("sanctuary", "Sanctuary"),
+                input_with_saved("ascent_online", "Ascent Online"),
+                input_with_saved("sanctuary_online", "Sanctuary Online"),
+                actionButton("submit_services", "Submit Services", class = "btn-primary"),
+                br(), br(),
+                uiOutput("services_status")
+        ),
+        
+        div(
+                class = "section-card",
+                h4("Adult Classrooms"),
+                lapply(seq_along(ADULT_CLASS_COLS), function(i) {
+                        input_with_saved(paste0("adult_", i), ADULT_CLASS_COLS[i])
+                }),
+                actionButton("submit_adults", "Submit Adult Classes", class = "btn-primary"),
+                br(), br(),
+                uiOutput("adults_status")
+        ),
+        
+        div(
+                class = "section-card",
+                h4("Children's Classrooms"),
+                lapply(seq_along(CHILD_CLASS_COLS), function(i) {
+                        input_with_saved(paste0("child_", i), CHILD_CLASS_COLS[i])
+                }),
+                actionButton("submit_children", "Submit Children's Classes", class = "btn-primary"),
+                br(), br(),
+                uiOutput("children_status")
+        ),
+        
+        div(
+                class = "section-card",
+                h4("Refresh"),
+                p(class = "muted", "The app refreshes automatically every 5 minutes, but you can also refresh manually."),
+                actionButton("refresh", "Refresh Saved Values", class = "btn-primary"),
+                br(), br(),
+                uiOutput("refresh_status")
+        )
+)
+
+ui <- fluidPage(
+        tags$head(
+                tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+                tags$style(HTML("
+      body {
+        background: #f5f7fb;
+      }
+      .container-fluid {
+        max-width: 900px;
+      }
+      .section-card {
+        background: white;
+        padding: 14px 16px;
+        border: 1px solid #d9dee8;
+        border-radius: 14px;
+        margin-bottom: 16px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      }
+      .muted {
+        color: #667085;
+      }
+      .saved-wrap {
+        padding-top: 31px;
+        color: #344054;
+        font-size: 15px;
+      }
+      .btn-primary {
+        width: 100%;
+        font-size: 16px;
+        font-weight: 600;
+        padding: 10px 14px;
+        border-radius: 10px;
+      }
+      .status-ok {
+        color: #067647;
+        font-weight: 600;
+      }
+      .status-err {
+        color: #b42318;
+        font-weight: 600;
+      }
+      .status-wip {
+        color: #175cd3;
+        font-weight: 600;
+      }
+      .form-group {
+        margin-bottom: 12px;
+      }
+      h4 {
+        margin-top: 0;
+      }
+    "))
+        ),
+        uiOutput("page_ui")
+)
+
+# =========================
+# SERVER
+# =========================
+
 server <- function(input, output, session) {
-        res_auth <- secure_server(check_credentials = check_credentials(credentials))
-
-        # Display today's date below the title
-        output$current_date <- renderText({ format(Sys.Date(), "%A, %B %d, %Y") })
-
-        # Check if data has already been submitted
-        check_submission <- function(sheet, category_column, name) {
-                data <- suppressWarnings(read_sheet(sheet))
-                
-                if (is.null(data) || nrow(data) == 0 || !("Date" %in% colnames(data))) {
-                        return("No data available.")
-                }
-                
-                today_data <- data[data$Date == format(Sys.Date(), "%m/%d/%Y") & data[[category_column]] == name, ]
-                
-                if (nrow(today_data) > 0) {
-                        return(paste("Submitted count:", today_data$Attendance))
-                } else {
-                        return("No submission yet for today.")
-                }
-        }
+        authenticated <- reactiveVal(FALSE)
+        logged_in_user <- reactiveVal(NULL)
         
-        output$submitted_services <- renderText({ check_submission(sheet_services, "Service") })
-        output$submitted_adults <- renderText({ check_submission(sheet_classes, "Classroom") })
-        output$submitted_children <- renderText({ check_submission(sheet_classes, "Classroom") })
-        
-        output$note_s2 <- renderText({
-                if (input$adult_Conversations_Toward_God_S2 >= 0) {
-                        "Count online attendees as well."
+        output$page_ui <- renderUI({
+                if (isTRUE(authenticated())) {
+                        main_app_ui
                 } else {
-                        ""
+                        login_ui
                 }
         })
         
-        output$note_kids_church <- renderText({
-                "Once per month, all Children's classrooms from Cradle Roll 1 to Juniors are combined into 'Kids Church'. Please enter the total attendance for Kids Church in the Notes field."
+        output$login_status <- renderUI(NULL)
+        
+        observeEvent(input$login_btn, {
+                user <- trimws(input$login_user)
+                pass <- input$login_pass
+                
+                if (check_login(user, pass)) {
+                        authenticated(TRUE)
+                        logged_in_user(user)
+                        output$login_status <- renderUI(NULL)
+                } else {
+                        output$login_status <- renderUI({
+                                div(class = "status-err", "Invalid username or password.")
+                        })
+                }
+        })
+        
+        observeEvent(input$logout_btn, {
+                authenticated(FALSE)
+                logged_in_user(NULL)
+        })
+        
+        date_str <- reactiveVal(today_ymd())
+        
+        output$today_out <- renderText({
+                paste0("Today: ", date_str())
+        })
+        
+        saved_s1 <- reactiveVal(NULL)
+        saved_s2 <- reactiveVal(NULL)
+        
+        set_status <- function(output_id, text, cls = "status-wip") {
+                output[[output_id]] <- renderUI({
+                        div(class = cls, text)
+                })
+        }
+        
+        pull_saved <- function() {
+                d <- isolate(date_str())
+                saved_s1(get_saved_row(SHEET1_ID, SHEET1_TAB, S1_COLS, d))
+                saved_s2(get_saved_row(SHEET2_ID, SHEET2_TAB, S2_COLS, d))
+        }
+        
+        observeEvent(authenticated(), {
+                if (isTRUE(authenticated())) {
+                        pull_saved()
+                }
+        }, ignoreInit = FALSE)
+        
+        observe({
+                req(authenticated())
+                invalidateLater(300000, session)  # 5 minutes
+                try({
+                        pull_saved()
+                }, silent = TRUE)
+        })
+        
+        observe({
+                req(authenticated())
+                
+                s1 <- saved_s1()
+                s2 <- saved_s2()
+                
+                get_service_saved <- function(which_input) {
+                        if (which_input == "ascent") {
+                                if (!is.null(s1) && "First/Ascent" %in% names(s1) && !is.na(s1[["First/Ascent"]][1])) {
+                                        return(s1[["First/Ascent"]][1])
+                                }
+                        }
+                        if (which_input == "sanctuary") {
+                                if (!is.null(s1) && "Second/Sanctuary" %in% names(s1) && !is.na(s1[["Second/Sanctuary"]][1])) {
+                                        return(s1[["Second/Sanctuary"]][1])
+                                }
+                        }
+                        if (which_input == "ascent_online") {
+                                if (!is.null(s1) && "AscentOnline" %in% names(s1) && !is.na(s1[["AscentOnline"]][1])) {
+                                        return(s1[["AscentOnline"]][1])
+                                }
+                        }
+                        if (which_input == "sanctuary_online") {
+                                if (!is.null(s1) && "SanctuaryOnline" %in% names(s1) && !is.na(s1[["SanctuaryOnline"]][1])) {
+                                        return(s1[["SanctuaryOnline"]][1])
+                                }
+                        }
+                        ""
+                }
+                
+                output$ascent_saved <- renderText(get_service_saved("ascent"))
+                output$sanctuary_saved <- renderText(get_service_saved("sanctuary"))
+                output$ascent_online_saved <- renderText(get_service_saved("ascent_online"))
+                output$sanctuary_online_saved <- renderText(get_service_saved("sanctuary_online"))
+                
+                for (i in seq_along(ADULT_CLASS_COLS)) {
+                        local({
+                                ii <- i
+                                nm <- ADULT_CLASS_COLS[ii]
+                                out_id <- paste0("adult_", ii, "_saved")
+                                
+                                output[[out_id]] <- renderText({
+                                        s2 <- saved_s2()
+                                        if (is.null(s2) || !(nm %in% names(s2))) return("")
+                                        v <- s2[[nm]][1]
+                                        if (is.na(v)) "" else as.character(v)
+                                })
+                        })
+                }
+                
+                for (i in seq_along(CHILD_CLASS_COLS)) {
+                        local({
+                                ii <- i
+                                nm <- CHILD_CLASS_COLS[ii]
+                                out_id <- paste0("child_", ii, "_saved")
+                                
+                                output[[out_id]] <- renderText({
+                                        s2 <- saved_s2()
+                                        if (is.null(s2) || !(nm %in% names(s2))) return("")
+                                        v <- s2[[nm]][1]
+                                        if (is.na(v)) "" else as.character(v)
+                                })
+                        })
+                }
+        })
+        
+        observeEvent(input$refresh, {
+                req(authenticated())
+                set_status("refresh_status", "Refreshing...", "status-wip")
+                
+                tryCatch({
+                        pull_saved()
+                        set_status("refresh_status", "Saved values refreshed.", "status-ok")
+                }, error = function(e) {
+                        set_status("refresh_status", paste("Refresh failed:", e$message), "status-err")
+                })
         })
         
         observeEvent(input$submit_services, {
-                data <- data.frame(
-                        Date = format(Sys.Date(), "%Y%m%d"),
-                        Service = church_services,
-                        Attendance = sapply(church_services, function(service) input[[paste0("service_", service)]], simplify = TRUE)
+                req(authenticated())
+                set_status("services_status", "Saving services...", "status-wip")
+                
+                d <- date_str()
+                
+                vals_sheet1 <- list(
+                        "First/Ascent" = as_int_or_na(input$ascent),
+                        "Second/Sanctuary" = as_int_or_na(input$sanctuary),
+                        "AscentOnline" = as_int_or_na(input$ascent_online),
+                        "SanctuaryOnline" = as_int_or_na(input$sanctuary_online),
+                        "Church_status" = "Open"
                 )
                 
-                sheet_append(sheet_services, as.list(data))  # Convert to named list
-                showNotification("Church services data submitted!", type = "message")
+                vals_sheet2 <- list(
+                        "Ascent" = as_int_or_na(input$ascent),
+                        "Sanctuary" = as_int_or_na(input$sanctuary),
+                        "Ascent Online" = as_int_or_na(input$ascent_online),
+                        "Sanctuary Online" = as_int_or_na(input$sanctuary_online)
+                )
+                
+                tryCatch({
+                        with_sheet_lock(SHEET1_ID, SHEET1_TAB, SHEET1_LOCK_CELL, fn = function() {
+                                existing <- get_saved_row(SHEET1_ID, SHEET1_TAB, S1_COLS, d)
+                                merged <- as.list(existing[1, , drop = TRUE])
+                                merged <- modifyList(merged, vals_sheet1)
+                                merged[["Date"]] <- d
+                                merged <- compute_sheet1_totals(merged)
+                                upsert_by_date(SHEET1_ID, SHEET1_TAB, S1_COLS, d, merged)
+                        })
+                        
+                        with_sheet_lock(SHEET2_ID, SHEET2_TAB, SHEET2_LOCK_CELL, fn = function() {
+                                existing <- get_saved_row(SHEET2_ID, SHEET2_TAB, S2_COLS, d)
+                                merged <- as.list(existing[1, , drop = TRUE])
+                                merged <- modifyList(merged, vals_sheet2)
+                                merged[["Date"]] <- d
+                                merged <- compute_sheet2_totals(merged)
+                                upsert_by_date(SHEET2_ID, SHEET2_TAB, S2_COLS, d, merged)
+                        })
+                        
+                        pull_saved()
+                        set_status("services_status", "Services saved successfully.", "status-ok")
+                }, error = function(e) {
+                        set_status("services_status", paste("Save failed:", e$message), "status-err")
+                })
         })
         
         observeEvent(input$submit_adults, {
-                data <- data.frame(
-                        Date = format(Sys.Date(), "%m/%d/%Y"),
-                        Classroom = adult_classrooms,
-                        Attendance = sapply(adult_classrooms, function(classroom) input[[paste0("adult_", gsub(" ", "_", classroom))]], simplify = TRUE)
-                )
+                req(authenticated())
+                set_status("adults_status", "Saving adult classes...", "status-wip")
                 
-                sheet_append(sheet_classes, as.list(data))  # Convert to named list
-                showNotification("Adult classroom data submitted!", type = "message")
+                d <- date_str()
+                vals_adults <- list()
+                
+                for (i in seq_along(ADULT_CLASS_COLS)) {
+                        vals_adults[[ADULT_CLASS_COLS[i]]] <- as_int_or_na(input[[paste0("adult_", i)]])
+                }
+                
+                tryCatch({
+                        with_sheet_lock(SHEET2_ID, SHEET2_TAB, SHEET2_LOCK_CELL, fn = function() {
+                                existing <- get_saved_row(SHEET2_ID, SHEET2_TAB, S2_COLS, d)
+                                merged <- as.list(existing[1, , drop = TRUE])
+                                merged <- modifyList(merged, vals_adults)
+                                merged[["Date"]] <- d
+                                merged <- compute_sheet2_totals(merged)
+                                upsert_by_date(SHEET2_ID, SHEET2_TAB, S2_COLS, d, merged)
+                        })
+                        
+                        pull_saved()
+                        set_status("adults_status", "Adult classes saved successfully.", "status-ok")
+                }, error = function(e) {
+                        set_status("adults_status", paste("Save failed:", e$message), "status-err")
+                })
         })
         
         observeEvent(input$submit_children, {
-                data <- data.frame(
-                        Date = format(Sys.Date(), "%m/%d/%Y"),
-                        Classroom = children_classrooms,
-                        Attendance = sapply(children_classrooms, function(classroom) input[[paste0("children_", gsub(" ", "_", classroom))]], simplify = TRUE),
-                        Notes = input$children_notes
-                )
+                req(authenticated())
+                set_status("children_status", "Saving children's classes...", "status-wip")
                 
-                sheet_append(sheet_classes, as.list(data))  # Convert to named list
-                showNotification("Children's classroom data submitted!", type = "message")
+                d <- date_str()
+                vals_children <- list()
+                
+                for (i in seq_along(CHILD_CLASS_COLS)) {
+                        vals_children[[CHILD_CLASS_COLS[i]]] <- as_int_or_na(input[[paste0("child_", i)]])
+                }
+                
+                tryCatch({
+                        with_sheet_lock(SHEET2_ID, SHEET2_TAB, SHEET2_LOCK_CELL, fn = function() {
+                                existing <- get_saved_row(SHEET2_ID, SHEET2_TAB, S2_COLS, d)
+                                merged <- as.list(existing[1, , drop = TRUE])
+                                merged <- modifyList(merged, vals_children)
+                                merged[["Date"]] <- d
+                                merged <- compute_sheet2_totals(merged)
+                                upsert_by_date(SHEET2_ID, SHEET2_TAB, S2_COLS, d, merged)
+                        })
+                        
+                        pull_saved()
+                        set_status("children_status", "Children's classes saved successfully.", "status-ok")
+                }, error = function(e) {
+                        set_status("children_status", paste("Save failed:", e$message), "status-err")
+                })
         })
 }
 
