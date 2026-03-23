@@ -29,6 +29,9 @@ SHEET2_LOCK_CELL <- "ZZ1"
 
 APP_TZ <- "America/New_York"
 
+LAST_UPDATED <- "2026-03-23"
+APP_VERSION <- "1.0"
+
 # Authenticate to Google Sheets using your service account JSON
 suppressMessages(gs4_auth(path = "URL TO JSON FILE"))
 
@@ -512,7 +515,37 @@ main_app_ui <- tagList(
                 actionButton("refresh", "Refresh Saved Values", class = "btn-primary"),
                 br(), br(),
                 uiOutput("refresh_status")
-        )
+        ),
+
+        app_footer <- function() {
+  div(
+    style = "margin-top: 30px; padding-top: 12px; border-top: 1px solid #e5e7eb; font-size: 13px; color: #667085;",
+    
+    div("Created by Jim Milks"),
+    
+    div(
+      paste0(
+        "Last updated: ",
+        LAST_UPDATED,
+        " | Version ",
+        APP_VERSION
+      )
+    ),
+    
+    div(
+      "Contact: ",
+      tags$a(href = "mailto:jrmilks@yahoo.com", "jrmilks@yahoo.com")
+    ),
+    
+    div(
+      tags$a(
+        href = "https://github.com/jrmilks74/KetSDA_data_entry/tree/main",
+        target = "_blank",
+        "View on GitHub"
+      )
+    )
+  )
+}
 )
 
 ui <- fluidPage(
