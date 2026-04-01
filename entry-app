@@ -6,24 +6,27 @@
 # - Services, adult classes, and children's classes can be submitted separately
 # - Saved values for today are shown beside each input
 # - Auto-refreshes saved values every 5 minutes
+# - Temporarily refreshes every 60 seconds for 5 minutes after a successful save
 # - Includes a simple in-app login screen for authorized users
+# - Shows an offline banner and disables saving when the phone loses internet
 
 library(shiny)
+library(shinyjs)
 library(googlesheets4)
 library(dplyr)
 library(digest)
+library(later)
 
 # =========================
 # CONFIG
 # =========================
 
-SHEET1_ID <- "SHEET ID"
-SHEET2_ID <- "SHEET ID"
+SHEET1_ID <- "1BsQR4TyAMkV2H09jzuj5yrOIotnOBTzLoSZ0r5PsBpk"
+SHEET2_ID <- "1jVZBbrb4JpY8LErc4pL9ExgVjIqoN2EM6ITZAmcedcw"
 
 SHEET1_TAB <- "Sheet1"
 SHEET2_TAB <- "2026"
 
-# Cells used as temporary locks during save
 SHEET1_LOCK_CELL <- "ZZ1"
 SHEET2_LOCK_CELL <- "ZZ1"
 
@@ -32,8 +35,7 @@ APP_TZ <- "America/New_York"
 LAST_UPDATED <- "2026-03-23"
 APP_VERSION <- "1.0"
 
-# Authenticate to Google Sheets using your service account JSON
-suppressMessages(gs4_auth(path = "JSON FILE NAME"))
+suppressMessages(gs4_auth(path = "church-sheets-auth.json"))
 
 # =========================
 # APP LOGIN
@@ -43,10 +45,8 @@ hash_password <- function(x) {
         digest::digest(x, algo = "sha256", serialize = FALSE)
 }
 
-# Replace these example users/passwords with your real users
 USER_HASHES <- c(
-        "USER1" = hash_password("CHANGETHISPASSWORD!"),
-        "USER2" = hash_password("CHANGETHISPASSWORD!")
+        "Deacons" = hash_password("Countthepeople!")
 )
 
 check_login <- function(username, password) {
@@ -145,6 +145,10 @@ CHILD_CLASS_COLS <- c(
 
 today_ymd <- function() {
         format(as.POSIXct(Sys.time(), tz = APP_TZ), "%Y-%m-%d")
+}
+
+sheet_date_value <- function(date_str) {
+        as.Date(date_str, format = "%Y-%m-%d")
 }
 
 as_int_or_na <- function(x) {
@@ -326,7 +330,7 @@ upsert_by_date <- function(ss, sheet, cols, date_str, new_values_named) {
                         if (nm %in% cols) existing[[nm]] <- new_values_named[[nm]]
                 }
                 
-                existing$Date <- date_str
+                existing$Date <- sheet_date_value(date_str)
                 
                 sheet_row <- idx + 1
                 last_col_letter <- col_to_letter(length(cols))
@@ -343,16 +347,23 @@ upsert_by_date <- function(ss, sheet, cols, date_str, new_values_named) {
                 invisible(existing)
         } else {
                 row <- empty_row(cols)
-                row$Date <- date_str
+                row$Date <- sheet_date_value(date_str)
                 
                 for (nm in names(new_values_named)) {
                         if (nm %in% cols) row[[nm]] <- new_values_named[[nm]]
                 }
                 
-                row$Date <- date_str
+                row$Date <- sheet_date_value(date_str)
                 new_df <- as.data.frame(row, stringsAsFactors = FALSE)
                 
-                sheet_append(ss, sheet = sheet, data = new_df)
+                next_row <- nrow(df) + 2
+                range_write(
+                        ss,
+                        sheet = sheet,
+                        range = paste0("A", next_row),
+                        data = new_df,
+                        col_names = FALSE
+                )
                 
                 invisible(new_df)
         }
@@ -424,6 +435,43 @@ compute_sheet2_totals <- function(vals) {
         vals
 }
 
+verify_sheet1_save <- function(date_str, expected_vals) {
+        row <- get_saved_row(SHEET1_ID, SHEET1_TAB, S1_COLS, date_str)
+        
+        checks <- c(
+                identical(as_int_or_na(row[["First/Ascent"]][1]), as_int_or_na(expected_vals[["First/Ascent"]])),
+                identical(as_int_or_na(row[["Second/Sanctuary"]][1]), as_int_or_na(expected_vals[["Second/Sanctuary"]])),
+                identical(as_int_or_na(row[["AscentOnline"]][1]), as_int_or_na(expected_vals[["AscentOnline"]])),
+                identical(as_int_or_na(row[["SanctuaryOnline"]][1]), as_int_or_na(expected_vals[["SanctuaryOnline"]])),
+                identical(as.character(row[["Church_status"]][1]), "Open")
+        )
+        
+        all(checks)
+}
+
+verify_sheet2_services_save <- function(date_str, expected_vals) {
+        row <- get_saved_row(SHEET2_ID, SHEET2_TAB, S2_COLS, date_str)
+        
+        checks <- c(
+                identical(as_int_or_na(row[["Ascent"]][1]), as_int_or_na(expected_vals[["Ascent"]])),
+                identical(as_int_or_na(row[["Sanctuary"]][1]), as_int_or_na(expected_vals[["Sanctuary"]])),
+                identical(as_int_or_na(row[["Ascent Online"]][1]), as_int_or_na(expected_vals[["Ascent Online"]])),
+                identical(as_int_or_na(row[["Sanctuary Online"]][1]), as_int_or_na(expected_vals[["Sanctuary Online"]]))
+        )
+        
+        all(checks)
+}
+
+verify_sheet2_group_save <- function(date_str, expected_vals) {
+        row <- get_saved_row(SHEET2_ID, SHEET2_TAB, S2_COLS, date_str)
+        
+        checks <- vapply(names(expected_vals), function(nm) {
+                identical(as_int_or_na(row[[nm]][1]), as_int_or_na(expected_vals[[nm]]))
+        }, logical(1))
+        
+        all(checks)
+}
+
 input_with_saved <- function(id, label) {
         fluidRow(
                 column(
@@ -445,18 +493,8 @@ app_footer <- function() {
         div(
                 style = "margin-top: 30px; padding-top: 12px; border-top: 1px solid #e5e7eb; font-size: 13px; color: #667085;",
                 div("Created by Jim Milks"),
-                div(
-                        paste0(
-                                "Last updated: ",
-                                LAST_UPDATED,
-                                " | Version ",
-                                APP_VERSION
-                        )
-                ),
-                div(
-                        "Contact: ",
-                        tags$a(href = "mailto:jrmilks@yahoo.com", "jrmilks@yahoo.com")
-                ),
+                div(paste0("Last updated: ", LAST_UPDATED, " | Version ", APP_VERSION)),
+                div("Contact: ", tags$a(href = "mailto:jrmilks@yahoo.com", "jrmilks@yahoo.com")),
                 div(
                         tags$a(
                                 href = "https://github.com/jrmilks74/KetSDA_data_entry/tree/main",
@@ -486,6 +524,12 @@ login_ui <- tagList(
 
 main_app_ui <- tagList(
         titlePanel("Church Attendance Entry"),
+        
+        div(
+                id = "offline_banner",
+                class = "offline-banner",
+                "No internet connection. Saving is temporarily disabled until your connection returns."
+        ),
         
         div(
                 style = "text-align: right; margin-bottom: 12px;",
@@ -536,7 +580,7 @@ main_app_ui <- tagList(
         div(
                 class = "section-card",
                 h4("Refresh"),
-                p(class = "muted", "The app refreshes automatically every 5 minutes, but you can also refresh manually."),
+                p(class = "muted", "The app refreshes automatically every 5 minutes, and every 60 seconds for 5 minutes after a save. You can also refresh manually."),
                 actionButton("refresh", "Refresh Saved Values", class = "btn-primary"),
                 br(), br(),
                 uiOutput("refresh_status")
@@ -546,6 +590,7 @@ main_app_ui <- tagList(
 )
 
 ui <- fluidPage(
+        useShinyjs(),
         tags$head(
                 tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
                 tags$style(HTML("
@@ -578,17 +623,36 @@ ui <- fluidPage(
         padding: 10px 14px;
         border-radius: 10px;
       }
+      .status-box {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        font-weight: 600;
+      }
       .status-ok {
         color: #067647;
-        font-weight: 600;
+        background: #ecfdf3;
+        border: 1px solid #abefc6;
       }
       .status-err {
         color: #b42318;
-        font-weight: 600;
+        background: #fef3f2;
+        border: 1px solid #fecdca;
       }
       .status-wip {
         color: #175cd3;
+        background: #eff8ff;
+        border: 1px solid #b2ddff;
+      }
+      .offline-banner {
+        display: none;
+        margin-bottom: 12px;
+        padding: 10px 12px;
+        border-radius: 10px;
         font-weight: 600;
+        color: #b42318;
+        background: #fef3f2;
+        border: 1px solid #fecdca;
       }
       .form-group {
         margin-bottom: 12px;
@@ -596,6 +660,35 @@ ui <- fluidPage(
       h4 {
         margin-top: 0;
       }
+    ")),
+                tags$script(HTML("
+      function setOfflineMode(isOffline) {
+        const banner = document.getElementById('offline_banner');
+        const btnIds = ['submit_services', 'submit_adults', 'submit_children', 'refresh'];
+
+        if (banner) {
+          banner.style.display = isOffline ? 'block' : 'none';
+        }
+
+        btnIds.forEach(function(id) {
+          const el = document.getElementById(id);
+          if (el) {
+            el.disabled = isOffline;
+          }
+        });
+      }
+
+      window.addEventListener('offline', function() {
+        setOfflineMode(true);
+      });
+
+      window.addEventListener('online', function() {
+        setOfflineMode(false);
+      });
+
+      document.addEventListener('DOMContentLoaded', function() {
+        setOfflineMode(!navigator.onLine);
+      });
     "))
         ),
         uiOutput("page_ui")
@@ -629,7 +722,7 @@ server <- function(input, output, session) {
                         output$login_status <- renderUI(NULL)
                 } else {
                         output$login_status <- renderUI({
-                                div(class = "status-err", "Invalid username or password.")
+                                div(class = "status-box status-err", "Invalid username or password.")
                         })
                 }
         })
@@ -647,11 +740,30 @@ server <- function(input, output, session) {
         
         saved_s1 <- reactiveVal(NULL)
         saved_s2 <- reactiveVal(NULL)
+        refresh_ms <- reactiveVal(300000)
         
         set_status <- function(output_id, text, cls = "status-wip") {
                 output[[output_id]] <- renderUI({
-                        div(class = cls, text)
+                        div(class = paste("status-box", cls), text)
                 })
+        }
+        
+        set_buttons_enabled <- function(enabled = TRUE) {
+                ids <- c("submit_services", "submit_adults", "submit_children", "refresh")
+                for (id in ids) {
+                        if (enabled) {
+                                shinyjs::enable(id)
+                        } else {
+                                shinyjs::disable(id)
+                        }
+                }
+        }
+        
+        boost_refresh_temporarily <- function() {
+                refresh_ms(60000)
+                later::later(function() {
+                        refresh_ms(300000)
+                }, delay = 300)
         }
         
         pull_saved <- function() {
@@ -668,7 +780,15 @@ server <- function(input, output, session) {
         
         observe({
                 req(authenticated())
-                invalidateLater(300000, session)
+                invalidateLater(refresh_ms(), session)
+                try({
+                        pull_saved()
+                }, silent = TRUE)
+        })
+        
+        observe({
+                req(authenticated())
+                invalidateLater(10000, session)
                 try({
                         pull_saved()
                 }, silent = TRUE)
@@ -742,19 +862,23 @@ server <- function(input, output, session) {
         
         observeEvent(input$refresh, {
                 req(authenticated())
+                set_buttons_enabled(FALSE)
                 set_status("refresh_status", "Refreshing...", "status-wip")
                 
                 tryCatch({
                         pull_saved()
-                        set_status("refresh_status", "Saved values refreshed.", "status-ok")
+                        set_status("refresh_status", "✓ Saved", "status-ok")
+                        set_buttons_enabled(TRUE)
                 }, error = function(e) {
                         set_status("refresh_status", paste("Refresh failed:", e$message), "status-err")
+                        set_buttons_enabled(TRUE)
                 })
         })
         
         observeEvent(input$submit_services, {
                 req(authenticated())
-                set_status("services_status", "Saving services...", "status-wip")
+                set_buttons_enabled(FALSE)
+                set_status("services_status", "Saving...", "status-wip")
                 
                 d <- date_str()
                 
@@ -793,15 +917,28 @@ server <- function(input, output, session) {
                         })
                         
                         pull_saved()
-                        set_status("services_status", "Services saved successfully.", "status-ok")
+                        
+                        ok1 <- verify_sheet1_save(d, vals_sheet1)
+                        ok2 <- verify_sheet2_services_save(d, vals_sheet2)
+                        
+                        if (ok1 && ok2) {
+                                boost_refresh_temporarily()
+                                set_status("services_status", "✓ Saved", "status-ok")
+                        } else {
+                                set_status("services_status", "Save may have completed, but verification did not fully confirm the spreadsheet values. Please refresh and check.", "status-err")
+                        }
+                        
+                        set_buttons_enabled(TRUE)
                 }, error = function(e) {
                         set_status("services_status", paste("Save failed:", e$message), "status-err")
+                        set_buttons_enabled(TRUE)
                 })
         })
         
         observeEvent(input$submit_adults, {
                 req(authenticated())
-                set_status("adults_status", "Saving adult classes...", "status-wip")
+                set_buttons_enabled(FALSE)
+                set_status("adults_status", "Saving...", "status-wip")
                 
                 d <- date_str()
                 vals_adults <- list()
@@ -821,15 +958,27 @@ server <- function(input, output, session) {
                         })
                         
                         pull_saved()
-                        set_status("adults_status", "Adult classes saved successfully.", "status-ok")
+                        
+                        ok <- verify_sheet2_group_save(d, vals_adults)
+                        
+                        if (ok) {
+                                boost_refresh_temporarily()
+                                set_status("adults_status", "✓ Saved", "status-ok")
+                        } else {
+                                set_status("adults_status", "Save may have completed, but verification did not fully confirm the spreadsheet values. Please refresh and check.", "status-err")
+                        }
+                        
+                        set_buttons_enabled(TRUE)
                 }, error = function(e) {
                         set_status("adults_status", paste("Save failed:", e$message), "status-err")
+                        set_buttons_enabled(TRUE)
                 })
         })
         
         observeEvent(input$submit_children, {
                 req(authenticated())
-                set_status("children_status", "Saving children's classes...", "status-wip")
+                set_buttons_enabled(FALSE)
+                set_status("children_status", "Saving...", "status-wip")
                 
                 d <- date_str()
                 vals_children <- list()
@@ -849,9 +998,20 @@ server <- function(input, output, session) {
                         })
                         
                         pull_saved()
-                        set_status("children_status", "Children's classes saved successfully.", "status-ok")
+                        
+                        ok <- verify_sheet2_group_save(d, vals_children)
+                        
+                        if (ok) {
+                                boost_refresh_temporarily()
+                                set_status("children_status", "✓ Saved", "status-ok")
+                        } else {
+                                set_status("children_status", "Save may have completed, but verification did not fully confirm the spreadsheet values. Please refresh and check.", "status-err")
+                        }
+                        
+                        set_buttons_enabled(TRUE)
                 }, error = function(e) {
                         set_status("children_status", paste("Save failed:", e$message), "status-err")
+                        set_buttons_enabled(TRUE)
                 })
         })
 }
