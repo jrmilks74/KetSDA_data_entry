@@ -21,8 +21,8 @@ library(later)
 # CONFIG
 # =========================
 
-SHEET1_ID <- "1BsQR4TyAMkV2H09jzuj5yrOIotnOBTzLoSZ0r5PsBpk"
-SHEET2_ID <- "1jVZBbrb4JpY8LErc4pL9ExgVjIqoN2EM6ITZAmcedcw"
+SHEET1_ID <- "SHEET ID #"
+SHEET2_ID <- "SHEET ID #"
 
 SHEET1_TAB <- "Sheet1"
 SHEET2_TAB <- "2026"
@@ -35,7 +35,7 @@ APP_TZ <- "America/New_York"
 LAST_UPDATED <- "2026-03-23"
 APP_VERSION <- "1.0"
 
-suppressMessages(gs4_auth(path = "church-sheets-auth.json"))
+suppressMessages(gs4_auth(path = "JSON FILE PATHWAY"))
 
 # =========================
 # APP LOGIN
@@ -46,7 +46,7 @@ hash_password <- function(x) {
 }
 
 USER_HASHES <- c(
-        "Deacons" = hash_password("Countthepeople!")
+        "USER ID" = hash_password("PASSWORD")
 )
 
 check_login <- function(username, password) {
